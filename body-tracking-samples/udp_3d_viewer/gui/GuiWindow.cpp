@@ -9,6 +9,7 @@ namespace
 {
     constexpr int kIpEditId = 1001;
     constexpr int kToggleButtonId = 1002;
+    constexpr int kExportButtonId = 1004;
     constexpr int kStatusLabelId = 1003;
     constexpr const char* kWindowClassName = "Udp3dViewerGuiWindow";
 }
@@ -108,6 +109,17 @@ bool GuiWindow::ConsumeToggleRequest()
     return true;
 }
 
+bool GuiWindow::ConsumeExportRequest()
+{
+    if (!m_exportRequested)
+    {
+        return false;
+    }
+
+    m_exportRequested = false;
+    return true;
+}
+
 void GuiWindow::SetStreamingState(bool streaming)
 {
     m_streaming = streaming;
@@ -150,6 +162,12 @@ LRESULT GuiWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 m_toggleRequested = true;
             }
             return 0;
+        case kExportButtonId:
+            if (HIWORD(wParam) == BN_CLICKED)
+            {
+                m_exportRequested = true;
+            }
+            return 0;
         case kIpEditId:
             if (HIWORD(wParam) == EN_CHANGE)
             {
@@ -167,6 +185,7 @@ LRESULT GuiWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         m_hwnd = nullptr;
         m_ipEdit = nullptr;
         m_toggleButton = nullptr;
+        m_exportButton = nullptr;
         m_statusLabel = nullptr;
         return 0;
     default:
@@ -183,6 +202,7 @@ void GuiWindow::CreateControls(HWND hwnd)
     const int controlHeight = 22;
     const int editWidth = 220;
     const int buttonWidth = 80;
+    const int exportButtonWidth = 120;
 
     HWND ipLabel = CreateWindowExA(
         0,
@@ -240,6 +260,20 @@ void GuiWindow::CreateControls(HWND hwnd)
         nullptr,
         nullptr);
 
+    m_exportButton = CreateWindowExA(
+        0,
+        "BUTTON",
+        "Export Hierarchy",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        margin,
+        margin + (controlHeight + 12) * 2,
+        exportButtonWidth,
+        controlHeight + 4,
+        hwnd,
+        reinterpret_cast<HMENU>(static_cast<intptr_t>(kExportButtonId)),
+        nullptr,
+        nullptr);
+
     if (m_ipEdit)
     {
         SetWindowTextA(m_ipEdit, m_ipAddress.c_str());
@@ -263,6 +297,10 @@ void GuiWindow::CreateControls(HWND hwnd)
         if (m_statusLabel)
         {
             SendMessage(m_statusLabel, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        }
+        if (m_exportButton)
+        {
+            SendMessage(m_exportButton, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         }
     }
 }

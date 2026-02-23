@@ -6,6 +6,10 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <ctime>
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -186,7 +190,128 @@ namespace
         bool m_wsaStarted = false;
     };
 
-    void UpdateGuiAndStreaming(GuiWindow& gui, UdpSender& sender)
+    // Global variable to store current body frame for export
+    k4abt_body_t s_currentBody = {};
+    bool s_hasCurrentBody = false;
+
+    // Get local position relative to parent
+    k4a_float3_t GetLocalPosition(const k4a_float3_t& jointPos, const k4a_float3_t& parentPos, k4abt_joint_id_t parentId)
+    {
+        if (parentId == K4ABT_JOINT_COUNT)
+        {
+            // Root joint (Pelvis) - local position is same as world position
+            return jointPos;
+        }
+        
+        // Local position = joint position - parent position
+        k4a_float3_t localPos;
+        localPos.xyz.x = jointPos.xyz.x - parentPos.xyz.x;
+        localPos.xyz.y = jointPos.xyz.y - parentPos.xyz.y;
+        localPos.xyz.z = jointPos.xyz.z - parentPos.xyz.z;
+        return localPos;
+    }
+
+    // Export hierarchy to CSV
+    void ExportHierarchy(const k4abt_body_t& body, const std::map<k4abt_joint_id_t, k4abt_joint_id_t>& parentMap)
+    {
+        // Generate filename with timestamp
+        std::time_t now = std::time(nullptr);
+        std::tm timeInfo;
+        localtime_s(&timeInfo, &now);
+        
+        std::ostringstream filename;
+        filename << "hierarchy_export_"
+                 << std::setfill('0') << std::setw(4) << (timeInfo.tm_year + 1900)
+                 << std::setw(2) << (timeInfo.tm_mon + 1)
+                 << std::setw(2) << timeInfo.tm_mday << "_"
+                 << std::setw(2) << timeInfo.tm_hour
+                 << std::setw(2) << timeInfo.tm_min
+                 << std::setw(2) << timeInfo.tm_sec
+                 << ".csv";
+        
+        std::ofstream file(filename.str());
+        if (!file.is_open())
+        {
+            std::cerr << "Failed to create export file: " << filename.str() << std::endl;
+            return;
+        }
+
+        // Write CSV header
+        file << "joint_index,joint_id,joint_name,parent_index,parent_name,local_pos_x,local_pos_y,local_pos_z,local_rot_x,local_rot_y,local_rot_z,local_rot_w,tracked\n";
+
+        // Calculate local rotations (relative to pelvis root)
+        Quaternion root = ToQuaternion(body.skeleton.joints[K4ABT_JOINT_PELVIS].orientation);
+        Quaternion invRoot = Inverse(root);
+
+        // Export each joint
+        for (int jointIdx = 0; jointIdx < static_cast<int>(K4ABT_JOINT_COUNT); jointIdx++)
+        {
+            k4abt_joint_id_t jointId = static_cast<k4abt_joint_id_t>(jointIdx);
+            const auto& joint = body.skeleton.joints[jointIdx];
+            
+            // Get parent info
+            k4abt_joint_id_t parentId = parentMap.count(jointId) ? parentMap.at(jointId) : K4ABT_JOINT_COUNT;
+            int parentIndex = (parentId == K4ABT_JOINT_COUNT) ? -1 : static_cast<int>(parentId);
+            
+            // Get joint name
+            std::string jointName = g_jointNames.count(jointId) ? g_jointNames.at(jointId) : "UNKNOWN";
+            std::string parentName = (parentId == K4ABT_JOINT_COUNT) ? "" : 
+                                     (g_jointNames.count(parentId) ? g_jointNames.at(parentId) : "UNKNOWN");
+            
+            // Calculate local position
+            k4a_float3_t localPos;
+            if (parentId == K4ABT_JOINT_COUNT)
+            {
+                // Root joint - local position is world position
+                localPos = joint.position;
+            }
+            else
+            {
+                const auto& parentPos = body.skeleton.joints[parentId].position;
+                localPos = GetLocalPosition(joint.position, parentPos, parentId);
+            }
+            
+            // Calculate local rotation (relative to parent, or pelvis root if no parent)
+            Quaternion worldRot = ToQuaternion(joint.orientation);
+            Quaternion localRot;
+            if (parentId == K4ABT_JOINT_COUNT)
+            {
+                // Root joint - local rotation is world rotation
+                localRot = worldRot;
+            }
+            else
+            {
+                // Calculate rotation relative to parent
+                Quaternion parentRot = ToQuaternion(body.skeleton.joints[parentId].orientation);
+                Quaternion invParentRot = Inverse(parentRot);
+                localRot = Multiply(invParentRot, worldRot);
+            }
+            
+            // Check if joint is tracked
+            int tracked = (joint.confidence_level >= K4ABT_JOINT_CONFIDENCE_LOW) ? 1 : 0;
+            
+            // Write CSV row
+            file << jointIdx << ","
+                 << static_cast<int>(jointId) << ","
+                 << jointName << ","
+                 << parentIndex << ","
+                 << parentName << ","
+                 << std::fixed << std::setprecision(6)
+                 << localPos.xyz.x << ","
+                 << localPos.xyz.y << ","
+                 << localPos.xyz.z << ","
+                 << localRot.x << ","
+                 << localRot.y << ","
+                 << localRot.z << ","
+                 << localRot.w << ","
+                 << tracked << "\n";
+        }
+        
+        file.close();
+        std::cout << "Hierarchy exported to: " << filename.str() << std::endl;
+    }
+
+    void UpdateGuiAndStreaming(GuiWindow& gui, UdpSender& sender, const std::map<k4abt_joint_id_t, k4abt_joint_id_t>& parentMap)
     {
         gui.PumpMessages();
         if (gui.ConsumeToggleRequest())
@@ -200,6 +325,18 @@ namespace
                 sender.Start(gui.GetIpAddress(), kUdpPort);
             }
             gui.SetStreamingState(sender.IsStreaming());
+        }
+        
+        if (gui.ConsumeExportRequest())
+        {
+            if (s_hasCurrentBody)
+            {
+                ExportHierarchy(s_currentBody, parentMap);
+            }
+            else
+            {
+                std::cout << "No body data available to export. Please wait for body tracking data." << std::endl;
+            }
         }
     }
 
@@ -218,6 +355,63 @@ namespace
             out[base + 2] = local.y;
             out[base + 3] = local.z;
         }
+    }
+
+    // Build parent joint map from bone list
+    // Note: The bone list connects joints, but we need to determine parent-child relationships
+    // Based on Kinect skeleton hierarchy: Pelvis is root, then spine goes up, limbs branch out
+    std::map<k4abt_joint_id_t, k4abt_joint_id_t> BuildParentMap()
+    {
+        std::map<k4abt_joint_id_t, k4abt_joint_id_t> parentMap;
+        // Pelvis has no parent
+        parentMap[K4ABT_JOINT_PELVIS] = K4ABT_JOINT_COUNT; // Use COUNT as invalid parent
+        
+        // Build parent map - bone list connects joints, we need to determine which is parent
+        // The bone list pairs represent connections, we'll use the standard Kinect hierarchy
+        // Pelvis -> SpineNavel -> SpineChest -> Neck -> Head -> Nose
+        parentMap[K4ABT_JOINT_SPINE_NAVEL] = K4ABT_JOINT_PELVIS;
+        parentMap[K4ABT_JOINT_SPINE_CHEST] = K4ABT_JOINT_SPINE_NAVEL;
+        parentMap[K4ABT_JOINT_NECK] = K4ABT_JOINT_SPINE_CHEST;
+        parentMap[K4ABT_JOINT_HEAD] = K4ABT_JOINT_NECK;
+        parentMap[K4ABT_JOINT_NOSE] = K4ABT_JOINT_HEAD;
+        
+        // Left arm: SpineChest -> ClavicleLeft -> ShoulderLeft -> ElbowLeft -> WristLeft -> HandLeft
+        parentMap[K4ABT_JOINT_CLAVICLE_LEFT] = K4ABT_JOINT_SPINE_CHEST;
+        parentMap[K4ABT_JOINT_SHOULDER_LEFT] = K4ABT_JOINT_CLAVICLE_LEFT;
+        parentMap[K4ABT_JOINT_ELBOW_LEFT] = K4ABT_JOINT_SHOULDER_LEFT;
+        parentMap[K4ABT_JOINT_WRIST_LEFT] = K4ABT_JOINT_ELBOW_LEFT;
+        parentMap[K4ABT_JOINT_HAND_LEFT] = K4ABT_JOINT_WRIST_LEFT;
+        parentMap[K4ABT_JOINT_HANDTIP_LEFT] = K4ABT_JOINT_HAND_LEFT;
+        parentMap[K4ABT_JOINT_THUMB_LEFT] = K4ABT_JOINT_WRIST_LEFT;
+        
+        // Right arm: SpineChest -> ClavicleRight -> ShoulderRight -> ElbowRight -> WristRight -> HandRight
+        parentMap[K4ABT_JOINT_CLAVICLE_RIGHT] = K4ABT_JOINT_SPINE_CHEST;
+        parentMap[K4ABT_JOINT_SHOULDER_RIGHT] = K4ABT_JOINT_CLAVICLE_RIGHT;
+        parentMap[K4ABT_JOINT_ELBOW_RIGHT] = K4ABT_JOINT_SHOULDER_RIGHT;
+        parentMap[K4ABT_JOINT_WRIST_RIGHT] = K4ABT_JOINT_ELBOW_RIGHT;
+        parentMap[K4ABT_JOINT_HAND_RIGHT] = K4ABT_JOINT_WRIST_RIGHT;
+        parentMap[K4ABT_JOINT_HANDTIP_RIGHT] = K4ABT_JOINT_HAND_RIGHT;
+        parentMap[K4ABT_JOINT_THUMB_RIGHT] = K4ABT_JOINT_WRIST_RIGHT;
+        
+        // Left leg: Pelvis -> HipLeft -> KneeLeft -> AnkleLeft -> FootLeft
+        parentMap[K4ABT_JOINT_HIP_LEFT] = K4ABT_JOINT_PELVIS;
+        parentMap[K4ABT_JOINT_KNEE_LEFT] = K4ABT_JOINT_HIP_LEFT;
+        parentMap[K4ABT_JOINT_ANKLE_LEFT] = K4ABT_JOINT_KNEE_LEFT;
+        parentMap[K4ABT_JOINT_FOOT_LEFT] = K4ABT_JOINT_ANKLE_LEFT;
+        
+        // Right leg: Pelvis -> HipRight -> KneeRight -> AnkleRight -> FootRight
+        parentMap[K4ABT_JOINT_HIP_RIGHT] = K4ABT_JOINT_PELVIS;
+        parentMap[K4ABT_JOINT_KNEE_RIGHT] = K4ABT_JOINT_HIP_RIGHT;
+        parentMap[K4ABT_JOINT_ANKLE_RIGHT] = K4ABT_JOINT_KNEE_RIGHT;
+        parentMap[K4ABT_JOINT_FOOT_RIGHT] = K4ABT_JOINT_ANKLE_RIGHT;
+        
+        // Face: Nose -> EyeLeft/EyeRight -> EarLeft/EarRight
+        parentMap[K4ABT_JOINT_EYE_LEFT] = K4ABT_JOINT_NOSE;
+        parentMap[K4ABT_JOINT_EAR_LEFT] = K4ABT_JOINT_EYE_LEFT;
+        parentMap[K4ABT_JOINT_EYE_RIGHT] = K4ABT_JOINT_NOSE;
+        parentMap[K4ABT_JOINT_EAR_RIGHT] = K4ABT_JOINT_EYE_RIGHT;
+        
+        return parentMap;
     }
 
     void MaybeSendBodyFrame(k4abt_frame_t bodyFrame, UdpSender& sender)
@@ -428,7 +622,7 @@ void VisualizeResult(k4abt_frame_t bodyFrame, Window3dWrapper& window3d, int dep
 
 }
 
-void PlayFile(InputSettings inputSettings, GuiWindow& gui, UdpSender& sender)
+void PlayFile(InputSettings inputSettings, GuiWindow& gui, UdpSender& sender, const std::map<k4abt_joint_id_t, k4abt_joint_id_t>& parentMap)
 {
     // Initialize the 3d window controller
     Window3dWrapper window3d;
@@ -468,7 +662,7 @@ void PlayFile(InputSettings inputSettings, GuiWindow& gui, UdpSender& sender)
 
     while (playbackResult == K4A_STREAM_RESULT_SUCCEEDED && s_isRunning)
     {
-        UpdateGuiAndStreaming(gui, sender);
+        UpdateGuiAndStreaming(gui, sender, parentMap);
         playbackResult = k4a_playback_get_next_capture(playbackHandle, &capture);
         if (playbackResult == K4A_STREAM_RESULT_EOF)
         {
@@ -506,6 +700,17 @@ void PlayFile(InputSettings inputSettings, GuiWindow& gui, UdpSender& sender)
             if (popFrameResult == K4A_WAIT_RESULT_SUCCEEDED)
             {
                 /************* Successfully get a body tracking result, process the result here ***************/
+                // Store current body for export
+                uint32_t numBodies = k4abt_frame_get_num_bodies(bodyFrame);
+                if (numBodies > 0)
+                {
+                    if (k4abt_frame_get_body_skeleton(bodyFrame, 0, &s_currentBody.skeleton) == K4A_RESULT_SUCCEEDED)
+                    {
+                        s_currentBody.id = k4abt_frame_get_body_id(bodyFrame, 0);
+                        s_hasCurrentBody = true;
+                    }
+                }
+                
                 VisualizeResult(bodyFrame, window3d, depthWidth, depthHeight);
                 MaybeSendBodyFrame(bodyFrame, sender);
                 //Release the bodyFrame
@@ -532,7 +737,7 @@ void PlayFile(InputSettings inputSettings, GuiWindow& gui, UdpSender& sender)
     k4a_playback_close(playbackHandle);
 }
 
-void PlayFromDevice(InputSettings inputSettings, GuiWindow& gui, UdpSender& sender)
+void PlayFromDevice(InputSettings inputSettings, GuiWindow& gui, UdpSender& sender, const std::map<k4abt_joint_id_t, k4abt_joint_id_t>& parentMap)
 {
     k4a_device_t device = nullptr;
     VERIFY(k4a_device_open(0, &device), "Open K4A Device failed!");
@@ -565,7 +770,7 @@ void PlayFromDevice(InputSettings inputSettings, GuiWindow& gui, UdpSender& send
 
     while (s_isRunning)
     {
-        UpdateGuiAndStreaming(gui, sender);
+        UpdateGuiAndStreaming(gui, sender, parentMap);
         k4a_capture_t sensorCapture = nullptr;
         k4a_wait_result_t getCaptureResult = k4a_device_get_capture(device, &sensorCapture, 0); // timeout_in_ms is set to 0
 
@@ -596,6 +801,17 @@ void PlayFromDevice(InputSettings inputSettings, GuiWindow& gui, UdpSender& send
         if (popFrameResult == K4A_WAIT_RESULT_SUCCEEDED)
         {
             /************* Successfully get a body tracking result, process the result here ***************/
+            // Store current body for export
+            uint32_t numBodies = k4abt_frame_get_num_bodies(bodyFrame);
+            if (numBodies > 0)
+            {
+                if (k4abt_frame_get_body_skeleton(bodyFrame, 0, &s_currentBody.skeleton) == K4A_RESULT_SUCCEEDED)
+                {
+                    s_currentBody.id = k4abt_frame_get_body_id(bodyFrame, 0);
+                    s_hasCurrentBody = true;
+                }
+            }
+            
             VisualizeResult(bodyFrame, window3d, depthWidth, depthHeight);
             MaybeSendBodyFrame(bodyFrame, sender);
             //Release the bodyFrame
@@ -630,19 +846,22 @@ int main(int argc, char** argv)
         return -1;
     }
 
+    // Build parent joint map
+    std::map<k4abt_joint_id_t, k4abt_joint_id_t> parentMap = BuildParentMap();
+
     GuiWindow gui;
-    gui.Create("UDP Streaming Controls", 100, 100, 340, 160);
+    gui.Create("UDP Streaming Controls", 100, 100, 340, 200);
     gui.SetStreamingState(false);
     UdpSender sender;
 
     // Either play the offline file or play from the device
     if (inputSettings.Offline == true)
     {
-        PlayFile(inputSettings, gui, sender);
+        PlayFile(inputSettings, gui, sender, parentMap);
     }
     else
     {
-        PlayFromDevice(inputSettings, gui, sender);
+        PlayFromDevice(inputSettings, gui, sender, parentMap);
     }
 
     return 0;
