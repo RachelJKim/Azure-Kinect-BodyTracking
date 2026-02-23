@@ -340,20 +340,29 @@ namespace
         }
     }
 
-    void PackLocalRotations(const k4abt_body_t& body, std::array<float, K4ABT_JOINT_COUNT * 4>& out)
+    // Pack 7 floats per joint: Position (X,Y,Z) + Rotation (W,X,Y,Z)
+    // Total payload: 32 joints * 7 floats = 224 floats = 896 bytes
+    void PackJointData(const k4abt_body_t& body, std::array<float, K4ABT_JOINT_COUNT * 7>& out)
     {
         Quaternion root = ToQuaternion(body.skeleton.joints[K4ABT_JOINT_PELVIS].orientation);
         Quaternion invRoot = Inverse(root);
 
         for (int joint = 0; joint < static_cast<int>(K4ABT_JOINT_COUNT); joint++)
         {
+            const k4a_float3_t& pos = body.skeleton.joints[joint].position;
             Quaternion world = ToQuaternion(body.skeleton.joints[joint].orientation);
             Quaternion local = Multiply(invRoot, world);
-            size_t base = static_cast<size_t>(joint) * 4;
-            out[base + 0] = local.w;
-            out[base + 1] = local.x;
-            out[base + 2] = local.y;
-            out[base + 3] = local.z;
+
+            size_t base = static_cast<size_t>(joint) * 7;
+            // Position
+            out[base + 0] = pos.xyz.x;
+            out[base + 1] = pos.xyz.y;
+            out[base + 2] = pos.xyz.z;
+            // Rotation (WXYZ)
+            out[base + 3] = local.w;
+            out[base + 4] = local.x;
+            out[base + 5] = local.y;
+            out[base + 6] = local.z;
         }
     }
 
@@ -433,8 +442,8 @@ namespace
             return;
         }
 
-        std::array<float, K4ABT_JOINT_COUNT * 4> payload;
-        PackLocalRotations(body, payload);
+        std::array<float, K4ABT_JOINT_COUNT * 7> payload;
+        PackJointData(body, payload);
         sender.Send(payload.data(), payload.size());
     }
 }
