@@ -341,8 +341,9 @@ namespace
     }
 
     // Pack 7 floats per joint: Position (X,Y,Z) + Rotation (W,X,Y,Z)
-    // Total payload: 32 joints * 7 floats = 224 floats = 896 bytes
-    void PackJointData(const k4abt_body_t& body, std::array<float, K4ABT_JOINT_COUNT * 7>& out)
+    // Plus 4 floats for pelvis world rotation at the end.
+    // Total payload: 32 joints * 7 floats + 4 = 228 floats = 912 bytes
+    void PackJointData(const k4abt_body_t& body, std::array<float, K4ABT_JOINT_COUNT * 7 + 4>& out)
     {
         Quaternion root = ToQuaternion(body.skeleton.joints[K4ABT_JOINT_PELVIS].orientation);
         Quaternion invRoot = Inverse(root);
@@ -364,6 +365,13 @@ namespace
             out[base + 5] = local.y;
             out[base + 6] = local.z;
         }
+
+        // Append pelvis world rotation (WXYZ) after the 32 joints
+        size_t pelvisRotBase = static_cast<size_t>(K4ABT_JOINT_COUNT) * 7;
+        out[pelvisRotBase + 0] = root.w;
+        out[pelvisRotBase + 1] = root.x;
+        out[pelvisRotBase + 2] = root.y;
+        out[pelvisRotBase + 3] = root.z;
     }
 
     // Build parent joint map from bone list
@@ -442,7 +450,7 @@ namespace
             return;
         }
 
-        std::array<float, K4ABT_JOINT_COUNT * 7> payload;
+        std::array<float, K4ABT_JOINT_COUNT * 7 + 4> payload;
         PackJointData(body, payload);
         sender.Send(payload.data(), payload.size());
     }
